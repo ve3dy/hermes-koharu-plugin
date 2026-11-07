@@ -1,0 +1,9 @@
+name: koharu
+version: 0.1.0
+requires_hermes: ">=0.23"
+description: "Hermes tools for translating manga pages with a headless Koharu runner (koharu-batch)."
+author: Veedy (https://github.com/ve3dy)
+kind: standalone
+provides_tools:
+  - koharu_translate
+  - koharu_status
