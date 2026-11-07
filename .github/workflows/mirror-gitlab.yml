@@ -1,0 +1,36 @@
+# GitHub is the primary repo. Every push here is mirrored to GitLab.
+name: Mirror to GitLab
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mirror-gitlab
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to GitLab
+        env:
+          GITLAB_DEPLOY_KEY: ${{ secrets.GITLAB_DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$GITLAB_DEPLOY_KEY" > ~/.ssh/gitlab
+          chmod 600 ~/.ssh/gitlab
+          # Pinned gitlab.com ED25519 host key (SHA256:eUXGGm1YGsMAS7vkcx6JOJdOGHPem5gQp4taiCfCLB8).
+          echo 'gitlab.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAfuCHKVTjquxvt6CM6tdG4SLp1Btn/nOeHHE5UOzRdf' > ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/gitlab -o IdentitiesOnly=yes"
+          git remote add gitlab git@gitlab.com:ve3dy/hermes-koharu-plugin.git
+          git push --force gitlab "$GITHUB_REF:$GITHUB_REF"
