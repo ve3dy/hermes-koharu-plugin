@@ -1,0 +1,172 @@
+# Unit tests and a real install/uninstall on Linux, Windows and macOS.
+# The install job builds koharu-batch from Koharu source with a stub hermes CLI,
+# so it proves the build and the Hermes CLI calls, not GPU inference.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+
+  install:
+    name: install (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    env:
+      RESTART_GATEWAY: "0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential clang pkg-config libfontconfig1-dev libssl-dev
+
+      - name: Stub hermes CLI and temp dirs (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          stub_dir="$RUNNER_TEMP/stub-bin"
+          mkdir -p "$stub_dir"
+          cat > "$stub_dir/hermes" <<'EOF'
+          #!/bin/sh
+          printf '%s\n' "$*" >> "$HERMES_STUB_LOG"
+          EOF
+          chmod +x "$stub_dir/hermes"
+          echo "$stub_dir" >> "$GITHUB_PATH"
+          {
+            echo "HERMES_BIN=$stub_dir/hermes"
+            echo "HERMES_STUB_LOG=$RUNNER_TEMP/hermes-stub.log"
+            echo "HERMES_HOME=$RUNNER_TEMP/hermes-home"
+            echo "KOHARU_HOME=$RUNNER_TEMP/koharu-home"
+            echo "KOHARU_EXPORT_DIR=$RUNNER_TEMP/koharu-exports"
+          } >> "$GITHUB_ENV"
+
+      - name: Stub hermes CLI and temp dirs (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $stubDir = Join-Path $env:RUNNER_TEMP 'stub-bin'
+          New-Item -ItemType Directory -Force -Path $stubDir | Out-Null
+          # Redirection first, so a trailing digit argument (3600) is not read as a handle.
+          Set-Content -Encoding ascii -Path (Join-Path $stubDir 'hermes.cmd') -Value @('@echo off', '>>"%HERMES_STUB_LOG%" echo %*')
+          Add-Content -Path $env:GITHUB_PATH -Value $stubDir
+          Add-Content -Path $env:GITHUB_ENV -Value @(
+            "HERMES_BIN=$(Join-Path $stubDir 'hermes.cmd')"
+            "HERMES_STUB_LOG=$(Join-Path $env:RUNNER_TEMP 'hermes-stub.log')"
+            "HERMES_HOME=$(Join-Path $env:RUNNER_TEMP 'hermes-home')"
+            "KOHARU_HOME=$(Join-Path $env:RUNNER_TEMP 'koharu-home')"
+            "KOHARU_EXPORT_DIR=$(Join-Path $env:RUNNER_TEMP 'koharu-exports')"
+          )
+
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/koharu-home/src
+          key: koharu-build-${{ runner.os }}-${{ hashFiles('runner/**') }}
+          restore-keys: koharu-build-${{ runner.os }}-
+
+      - name: Install (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash scripts/install.sh
+
+      - name: Dry run on Windows PowerShell 5.1
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 -DryRun
+
+      - name: Install (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1
+
+      - name: Save build cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ${{ runner.temp }}/koharu-home/src
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Check install (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$("$KOHARU_HOME/bin/koharu-batch" --version)"
+          echo "$version"
+          [[ "$version" =~ ^koharu-batch\ [0-9]+\.[0-9]+\.[0-9]+$ ]]
+          cat "$HERMES_STUB_LOG"
+          grep -F 'plugins enable koharu' "$HERMES_STUB_LOG"
+          test -f "$HERMES_HOME/plugins/koharu/plugin.yaml"
+          bash scripts/install.sh | tee "$RUNNER_TEMP/rerun.log"
+          grep -F 'build skipped' "$RUNNER_TEMP/rerun.log"
+
+      - name: Check install (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $runner = Join-Path $env:KOHARU_HOME 'bin\koharu-batch.exe'
+          $version = (& $runner --version | Out-String).Trim()
+          Write-Host $version
+          if ($version -notmatch '^koharu-batch \d+\.\d+\.\d+$') { throw "unexpected --version output: $version" }
+          Get-Content $env:HERMES_STUB_LOG
+          if (-not (Select-String -Path $env:HERMES_STUB_LOG -SimpleMatch 'plugins enable koharu' -Quiet)) { throw 'hermes stub log has no plugins enable koharu call' }
+          if (-not (Test-Path (Join-Path $env:HERMES_HOME 'plugins\koharu\plugin.yaml'))) { throw 'plugin was not copied into HERMES_HOME' }
+          $rerun = pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/install.ps1 | Out-String
+          Write-Host $rerun
+          if ($LASTEXITCODE -ne 0) { throw "rerun failed with exit $LASTEXITCODE" }
+          if ($rerun -notmatch 'build skipped') { throw 'rerun did not skip the build' }
+
+      - name: Uninstall (Linux, macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/uninstall.sh --purge
+          test ! -e "$KOHARU_HOME/bin/koharu-batch"
+          test ! -e "$KOHARU_HOME"
+          test ! -e "$HERMES_HOME/plugins/koharu"
+          grep -F 'plugins disable koharu' "$HERMES_STUB_LOG"
+
+      - name: Uninstall (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/uninstall.ps1 -Purge
+          if ($LASTEXITCODE -ne 0) { throw "uninstall failed with exit $LASTEXITCODE" }
+          if (Test-Path (Join-Path $env:KOHARU_HOME 'bin\koharu-batch.exe')) { throw 'runner still installed' }
+          if (Test-Path $env:KOHARU_HOME) { throw 'KOHARU_HOME still exists after -Purge' }
+          if (Test-Path (Join-Path $env:HERMES_HOME 'plugins\koharu')) { throw 'plugin dir still exists' }
+          if (-not (Select-String -Path $env:HERMES_STUB_LOG -SimpleMatch 'plugins disable koharu' -Quiet)) { throw 'hermes stub log has no plugins disable koharu call' }
