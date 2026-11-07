@@ -1,0 +1,24 @@
+[package]
+name = "koharu-batch"
+# Takes Koharu's workspace version, so `koharu-batch --version` reports the
+# Koharu release it was built against.
+version.workspace = true
+edition.workspace = true
+description = "Headless batch runner for Koharu, used by hermes-koharu-plugin."
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+clap = { workspace = true }
+image = { workspace = true }
+koharu-config = { workspace = true }
+koharu-ml = { workspace = true }
+koharu-pipeline = { workspace = true }
+koharu-rasterizer = { workspace = true, features = ["native"] }
+koharu-renderer = { workspace = true }
+koharu-scene = { workspace = true }
+koharu-translator = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
